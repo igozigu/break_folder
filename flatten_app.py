@@ -488,24 +488,15 @@ class FlattenApp:
 
     def _start(self) -> None:
         if self.target_dir is None:
-            messagebox.showwarning("폴더 미선택", "먼저 평탄화할 대상 폴더를 드래그하거나 선택해주세요.")
+            self.status_var.set("⚠️ 먼저 평탄화할 대상 폴더를 드래그하거나 선택해주세요.")
+            self._log("⚠️ 대상 폴더가 지정되지 않았습니다.")
             return
         if not self.target_dir.exists():
-            messagebox.showerror("오류", f"해당 폴더가 존재하지 않습니다:\n{self.target_dir}")
+            self.status_var.set(f"❌ 폴더가 존재하지 않습니다: {self.target_dir}")
+            self._log(f"❌ 폴더가 존재하지 않습니다: {self.target_dir}")
             return
 
-        ok = messagebox.askyesno(
-            "작업 확인",
-            f"다음 폴더를 평탄화(Flatten)하시겠습니까?\n\n"
-            f"경로: {self.target_dir}\n\n"
-            "• 하위 모든 파일이 'all_files' 폴더로 모입니다.\n"
-            "• 비어있는 하위 폴더는 모두 삭제됩니다.\n"
-            "• 작업 내역은 CSV 로그에 기록됩니다.\n\n"
-            "정말 진행하시겠습니까?",
-        )
-        if not ok:
-            return
-
+        # 확인 팝업 없이 즉시 시작
         self.is_running = True
         self.cancel_event.clear()
         self.start_btn.config(state=tk.DISABLED)
@@ -532,8 +523,8 @@ class FlattenApp:
         try:
             self._do_flatten()
         except Exception as exc:
-            self.root.after(0, lambda: self._log(f"❌ 예상치 못한 오류: {exc}"))
-            self.root.after(0, lambda: messagebox.showerror("오류 발생", str(exc)))
+            self.root.after(0, lambda: self._log(f"❌ 오류 발생: {exc}"))
+            self.root.after(0, lambda: self.status_var.set(f"❌ 오류: {exc}"))
         finally:
             self.root.after(0, self._finish)
 
@@ -552,9 +543,8 @@ class FlattenApp:
         total = len(files)
 
         if total == 0:
-            ui(lambda: self._log("이동할 하위 파일이 없습니다 (이미 평탄화되어 있거나 비어있음)."))
+            ui(lambda: self._log("ℹ️ 이동할 하위 파일이 없습니다 (이미 평탄화되어 있거나 비어있음)."))
             ui(lambda: self._update_progress(100, "완료 — 이동할 파일 없음"))
-            ui(lambda: messagebox.showinfo("완료", "이동할 하위 파일이 없습니다."))
             return
 
         ui(lambda: self._log(f"  → 발견된 총 파일: {total}개"))
@@ -670,41 +660,16 @@ class FlattenApp:
             )
         )
 
-        # ── 완료 알림 ──
+        # ── 완료 처리 (별도 팝업 없이 UI 내 직접 반영) ──
         if self.cancel_event.is_set():
-            ui(lambda: self._update_progress(100, "작업 취소됨 (부분 완료)"))
-            ui(
-                lambda: messagebox.showwarning(
-                    "작업 취소",
-                    f"사용자에 의해 작업이 취소되었습니다.\n\n"
-                    f"처리 완료: {success_count}/{total}개\n"
-                    f"로그 파일: {log_path}",
-                )
-            )
+            ui(lambda: self._update_progress(100, "⚠️ 작업 취소됨 (부분 완료)"))
+            ui(lambda: self._log(f"⚠️ 작업이 취소되었습니다. (처리: {success_count}/{total}개, 로그: {log_path})"))
         elif match:
-            ui(lambda: self._update_progress(100, f"✅ 완료! {success_count}개 파일 이동 성공"))
-            ui(lambda: self._log("🎉 모든 평탄화 작업이 성공적으로 완료되었습니다!"))
-            ui(
-                lambda: messagebox.showinfo(
-                    "작업 완료",
-                    f"폴더 평탄화가 성공적으로 완료되었습니다!\n\n"
-                    f"• 이동된 파일: {success_count}개\n"
-                    f"• 리네임된 파일: {renamed_count}개\n"
-                    f"• 로그 파일: {log_path}",
-                )
-            )
+            ui(lambda: self._update_progress(100, f"✅ 평탄화 완료! ({success_count}개 파일 이동)"))
+            ui(lambda: self._log(f"🎉 모든 평탄화 작업이 완료되었습니다! (이동: {success_count}개, 리네임: {renamed_count}개, 로그: {log_path})"))
         else:
             ui(lambda: self._update_progress(100, "⚠️ 완료되었으나 수치 불일치"))
-            ui(
-                lambda: messagebox.showwarning(
-                    "확인 필요",
-                    f"작업이 완료되었으나 수치에 차이가 있습니다.\n\n"
-                    f"예상 파일 수: {total}\n"
-                    f"실제 이동된 수: {actual_count}\n"
-                    f"실패 건수: {fail_count}\n\n"
-                    f"로그 파일을 확인해주세요:\n{log_path}",
-                )
-            )
+            ui(lambda: self._log(f"⚠️ 파일 수 불일치! 예상: {total}, 실제: {actual_count}, 실패: {fail_count} → 로그 확인: {log_path}"))
 
     # ────────────────────────── 실행 ──────────────────────────
 
