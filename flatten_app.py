@@ -3,7 +3,8 @@
 폴더 평탄화(Flatten) GUI 유틸리티
 ─────────────────────────────────
 드래그 앤 드롭 또는 폴더 선택으로 대상 폴더를 지정하고,
-모든 하위 파일을 'all_files' 폴더로 모은 뒤 빈 폴더를 삭제합니다.
+원본 파일 및 폴더 구조는 일절 건드리지 않고(삭제/이동 없음),
+대상 폴더 내의 모든 파일(루트 파일 및 하위 파일)을 'all_files' 폴더로 복사(Copy)합니다.
 
 빌드:
     pip install pyinstaller tkinterdnd2
@@ -12,7 +13,6 @@
 
 from __future__ import annotations
 
-import csv
 import ctypes
 import os
 import shutil
@@ -192,7 +192,7 @@ class FlattenApp:
         ttk.Label(main, text="📁 폴더 평탄화 (Flatten)", style="Title.TLabel").pack(pady=(0, 4))
         ttk.Label(
             main,
-            text="하위 폴더의 모든 파일을 all_files 폴더 하나로 모으고 빈 폴더를 정리합니다",
+            text="원본 파일과 폴더는 그대로 유지하고, 모든 파일을 all_files 폴더로 복사(Copy)합니다",
             style="Sub.TLabel",
         ).pack(pady=(0, 14))
 
