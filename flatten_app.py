@@ -6,33 +6,34 @@
 모든 하위 파일을 'all_files' 폴더로 모은 뒤 빈 폴더를 삭제합니다.
 
 빌드:
-    pip install pyinstaller windnd
-    pyinstaller --onefile --windowed --name flatten_app flatten_app.py
+    pip install pyinstaller tkinterdnd2
+    pyinstaller --onefile --windowed --collect-all tkinterdnd2 --name flatten_app flatten_app.py
 """
 
 from __future__ import annotations
 
 import csv
+import ctypes
 import os
 import shutil
 import sys
 import threading
-import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import List, Optional, Tuple
 
-try:
-    import windnd
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
-    HAS_WINDND = True
-except ImportError:
-    HAS_WINDND = False
+# TkinterDnD2 임포트 시도
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    HAS_TKDND = True
+except Exception:
+    HAS_TKDND = False
 
 
 # ═══════════════════════════════ 유틸리티 ═══════════════════════════════
-
 
 def long_path(p: str) -> str:
     """Windows 260자 경로 제한 우회."""
@@ -42,7 +43,6 @@ def long_path(p: str) -> str:
 
 
 # ═══════════════════════════════ 핵심 로직 ═══════════════════════════════
-
 
 def scan_files(target_dir: Path, all_files_dir: Path) -> List[Path]:
     """target_dir 하위를 재귀 스캔하여 이동 대상 파일 목록을 반환."""
@@ -61,8 +61,10 @@ def scan_files(target_dir: Path, all_files_dir: Path) -> List[Path]:
             dirnames.remove(af_name)
 
         for fname in filenames:
-            # flatten_log 파일 제외
+            # flatten_log 및 실행 파일 제외
             if fname.startswith("flatten_log_") and fname.endswith(".csv"):
+                continue
+            if getattr(sys, "frozen", False) and fname == Path(sys.executable).name:
                 continue
             full_path = real_dirpath / fname
             # 이미 루트에 있는 파일은 이동 불필요
@@ -115,11 +117,10 @@ def plan_renames(
 
 # ═══════════════════════════════ GUI 앱 ═══════════════════════════════
 
-
 class FlattenApp:
     """폴더 평탄화 GUI 앱."""
 
-    # ─── Catppuccin Mocha 기반 색상 ───
+    # ─── 테마 색상 ───
     BG = "#1e1e2e"
     FG = "#cdd6f4"
     ACCENT = "#89b4fa"
@@ -127,14 +128,26 @@ class FlattenApp:
     WARNING = "#f9e2af"
     ERROR = "#f38ba8"
     SURFACE = "#313244"
-    OVERLAY = "#45475a"
+    SURFACE_HOVER = "#45475a"
+    OVERLAY = "#585b70"
     DARK = "#11111b"
 
     def __init__(self) -> None:
-        self.root = tk.Tk()
+        # TkinterDnD 사용 가능 시 TkinterDnD.Tk() 인스턴스 생성
+        if HAS_TKDND:
+            try:
+                self.root = TkinterDnD.Tk()
+                self.use_tkdnd = True
+            except Exception:
+                self.root = tk.Tk()
+                self.use_tkdnd = False
+        else:
+            self.root = tk.Tk()
+            self.use_tkdnd = False
+
         self.root.title("폴더 평탄화 (Flatten)")
-        self.root.geometry("780x680")
-        self.root.minsize(640, 520)
+        self.root.geometry("780x700")
+        self.root.minsize(640, 540)
         self.root.configure(bg=self.BG)
 
         self.target_dir: Optional[Path] = None
@@ -143,10 +156,7 @@ class FlattenApp:
 
         self._setup_styles()
         self._build_ui()
-
-        # 전체 창에 드래그 앤 드롭 후킹
-        if HAS_WINDND:
-            windnd.hook_dropfiles(self.root, func=self._on_drop)
+        self._setup_drag_and_drop()
 
     # ────────────────────────── 스타일 ──────────────────────────
 
@@ -156,8 +166,8 @@ class FlattenApp:
         style.configure("TFrame", background=self.BG)
         style.configure("TLabel", background=self.BG, foreground=self.FG, font=("Segoe UI", 10))
         style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"), foreground=self.ACCENT)
-        style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground=self.OVERLAY)
-        style.configure("Path.TLabel", font=("Segoe UI", 9, "bold"), foreground=self.SUCCESS)
+        style.configure("Sub.TLabel", font=("Segoe UI", 9), foreground=self.FG)
+        style.configure("Path.TLabel", font=("Segoe UI", 10, "bold"), foreground=self.SUCCESS)
         style.configure("Status.TLabel", font=("Segoe UI", 10), foreground=self.WARNING)
         style.configure(
             "green.Horizontal.TProgressbar",
@@ -175,7 +185,7 @@ class FlattenApp:
         ttk.Label(main, text="📁 폴더 평탄화 (Flatten)", style="Title.TLabel").pack(pady=(0, 4))
         ttk.Label(
             main,
-            text="하위 폴더의 모든 파일을 all_files 폴더 하나로 모읍니다",
+            text="하위 폴더의 모든 파일을 all_files 폴더 하나로 모으고 빈 폴더를 정리합니다",
             style="Sub.TLabel",
         ).pack(pady=(0, 14))
 
@@ -184,82 +194,101 @@ class FlattenApp:
             main,
             bg=self.SURFACE,
             highlightbackground=self.ACCENT,
-            highlightthickness=2,
+            highlightthickness=3,
             cursor="hand2",
         )
-        self.drop_frame.pack(fill=tk.X, pady=(0, 8), ipady=28)
+        self.drop_frame.pack(fill=tk.X, pady=(0, 10), ipady=24)
+
+        self.drop_icon = tk.Label(
+            self.drop_frame,
+            text="📂",
+            bg=self.SURFACE,
+            fg=self.ACCENT,
+            font=("Segoe UI Emoji", 32),
+        )
+        self.drop_icon.pack(pady=(8, 2))
 
         self.drop_label = tk.Label(
             self.drop_frame,
-            text="📂  폴더를 여기에 드래그하세요\n또는 클릭하여 폴더 선택",
+            text="폴더를 이곳에 드래그 앤 드롭하세요\n(또는 클릭하여 폴더 선택)",
             bg=self.SURFACE,
             fg=self.FG,
-            font=("Segoe UI", 13),
+            font=("Segoe UI", 12, "bold"),
             justify=tk.CENTER,
         )
-        self.drop_label.pack(expand=True, pady=12)
+        self.drop_label.pack(expand=True, pady=(0, 8))
 
-        self.drop_frame.bind("<Button-1>", lambda _: self._browse_folder())
-        self.drop_label.bind("<Button-1>", lambda _: self._browse_folder())
+        # 클릭 이벤트 바인딩
+        for widget in (self.drop_frame, self.drop_icon, self.drop_label):
+            widget.bind("<Button-1>", lambda _: self._browse_folder())
 
-        if HAS_WINDND:
-            windnd.hook_dropfiles(self.drop_frame, func=self._on_drop)
+        # ── 선택 경로 표시 ──
+        path_box = tk.Frame(main, bg=self.SURFACE, padx=10, pady=8)
+        path_box.pack(fill=tk.X, pady=(0, 14))
 
-        # ── 선택 경로 ──
-        self.path_var = tk.StringVar(value="선택된 폴더: (없음)")
-        ttk.Label(main, textvariable=self.path_var, style="Path.TLabel").pack(
-            anchor=tk.W, pady=(0, 14)
+        ttk.Label(path_box, text="선택된 폴더:", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+        self.path_var = tk.StringVar(value="아직 선택된 폴더가 없습니다")
+        self.path_label = tk.Label(
+            path_box,
+            textvariable=self.path_var,
+            bg=self.SURFACE,
+            fg=self.SUCCESS,
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.W,
         )
+        self.path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
 
-        # ── 버튼 영역 ──
+        # ── 큰 액션 버튼 영역 (시작 / 취소) ──
         btn_frame = ttk.Frame(main)
         btn_frame.pack(fill=tk.X, pady=(0, 14))
 
         self.start_btn = tk.Button(
             btn_frame,
             text="🚀  작업 시작",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 14, "bold"),
             bg="#a6e3a1",
-            fg="#1e1e2e",
+            fg="#11111b",
             activebackground="#94d898",
-            activeforeground="#1e1e2e",
-            relief=tk.FLAT,
+            activeforeground="#11111b",
+            relief=tk.RAISED,
+            bd=3,
             cursor="hand2",
-            padx=30,
-            pady=10,
+            padx=32,
+            pady=12,
             command=self._start,
         )
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 12))
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 14))
 
         self.cancel_btn = tk.Button(
             btn_frame,
             text="❌  작업 취소",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 14, "bold"),
             bg="#f38ba8",
-            fg="#1e1e2e",
+            fg="#11111b",
             activebackground="#e67a95",
-            activeforeground="#1e1e2e",
-            relief=tk.FLAT,
+            activeforeground="#11111b",
+            relief=tk.RAISED,
+            bd=3,
             cursor="hand2",
-            padx=30,
-            pady=10,
+            padx=32,
+            pady=12,
             state=tk.DISABLED,
             command=self._cancel,
         )
-        self.cancel_btn.pack(side=tk.LEFT, padx=(0, 12))
+        self.cancel_btn.pack(side=tk.LEFT, padx=(0, 14))
 
         self.browse_btn = tk.Button(
             btn_frame,
-            text="📂  폴더 선택",
-            font=("Segoe UI", 10),
+            text="📁 폴더 찾아보기...",
+            font=("Segoe UI", 11),
             bg=self.OVERLAY,
             fg=self.FG,
             activebackground=self.SURFACE,
             activeforeground=self.FG,
             relief=tk.FLAT,
             cursor="hand2",
-            padx=16,
-            pady=7,
+            padx=18,
+            pady=10,
             command=self._browse_folder,
         )
         self.browse_btn.pack(side=tk.RIGHT)
@@ -272,15 +301,19 @@ class FlattenApp:
             maximum=100,
             style="green.Horizontal.TProgressbar",
         )
-        self.progress.pack(fill=tk.X, pady=(0, 4))
+        self.progress.pack(fill=tk.X, pady=(0, 6))
 
         # ── 상태 텍스트 ──
-        self.status_var = tk.StringVar(value="대기 중...")
+        self.status_var = tk.StringVar(value="대기 중... 폴더를 드래그하거나 선택해주세요.")
         ttk.Label(main, textvariable=self.status_var, style="Status.TLabel").pack(
             anchor=tk.W, pady=(0, 8)
         )
 
         # ── 로그 영역 ──
+        log_header = ttk.Frame(main)
+        log_header.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(log_header, text="작업 로그", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT)
+
         log_frame = tk.Frame(main, bg=self.SURFACE)
         log_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -300,17 +333,125 @@ class FlattenApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    # ────────────────────────── 이벤트 핸들러 ──────────────────────────
+    # ──────────────────────── 드래그 앤 드롭 설정 ────────────────────────
 
-    def _on_drop(self, files: list) -> None:
-        """드래그 앤 드롭 콜백."""
-        if self.is_running or not files:
+    def _setup_drag_and_drop(self) -> None:
+        """TkinterDnD 또는 Windows Win32 API를 통한 드래그 앤 드롭 등록."""
+        if self.use_tkdnd:
+            self._setup_tkdnd()
+        else:
+            self._setup_win32_dnd()
+
+    def _setup_tkdnd(self) -> None:
+        """tkinterdnd2 기반 드래그앤드롭."""
+        try:
+            for w in (self.root, self.drop_frame, self.drop_label, self.drop_icon):
+                w.drop_target_register(DND_FILES)
+                w.dnd_bind("<<Drop>>", self._on_tkdnd_drop)
+                w.dnd_bind("<<DragEnter>>", self._on_drag_enter)
+                w.dnd_bind("<<DragLeave>>", self._on_drag_leave)
+            self._log("드래그 앤 드롭 활성화 완료 (TkinterDnD2 엔진)")
+        except Exception as e:
+            self._log(f"TkinterDnD 바인딩 실패, 대체 수단 시도: {e}")
+            self._setup_win32_dnd()
+
+    def _on_drag_enter(self, _event) -> None:
+        self.drop_frame.config(bg=self.SURFACE_HOVER, highlightbackground=self.SUCCESS)
+        self.drop_icon.config(bg=self.SURFACE_HOVER)
+        self.drop_label.config(bg=self.SURFACE_HOVER)
+
+    def _on_drag_leave(self, _event) -> None:
+        self.drop_frame.config(bg=self.SURFACE, highlightbackground=self.ACCENT)
+        self.drop_icon.config(bg=self.SURFACE)
+        self.drop_label.config(bg=self.SURFACE)
+
+    def _on_tkdnd_drop(self, event) -> None:
+        self._on_drag_leave(None)
+        if self.is_running:
             return
-        path = files[0]
-        if isinstance(path, bytes):
-            path = path.decode("utf-8")
-        p = Path(path)
-        self._set_target(p if p.is_dir() else p.parent)
+        data = event.data
+        if not data:
+            return
+
+        try:
+            # tkinter splitlist로 감싸인 경로 분리
+            paths = self.root.tk.splitlist(data)
+            if paths:
+                first_path = paths[0]
+                self._handle_dropped_path(first_path)
+        except Exception as e:
+            self._log(f"드롭 데이터 처리 오류: {e}")
+
+    def _setup_win32_dnd(self) -> None:
+        """순수 ctypes Win32 API(DragAcceptFiles) 기반 폴더 드롭 수신."""
+        if sys.platform != "win32":
+            return
+
+        try:
+            self.root.update_idletasks()
+            hwnd = self.root.winfo_id()
+            GA_ROOT = 2
+            root_hwnd = ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT)
+            target_hwnd = root_hwnd if root_hwnd else hwnd
+
+            # UIPI 필터 해제 (관리자/일반 권한 차이 완화)
+            WM_DROPFILES = 0x0233
+            WM_COPYDATA = 0x004A
+            WM_COPYGLOBALDATA = 0x0049
+            MSGFLT_ALLOW = 1
+
+            ChangeWindowMessageFilter = getattr(ctypes.windll.user32, "ChangeWindowMessageFilter", None)
+            if ChangeWindowMessageFilter:
+                for msg in (WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA):
+                    ChangeWindowMessageFilter(msg, MSGFLT_ALLOW)
+
+            # 드롭 수신 활성화
+            ctypes.windll.shell32.DragAcceptFiles(target_hwnd, True)
+
+            # WndProc 서브클래싱
+            is_64bit = sys.maxsize > 2**32
+            argtype = ctypes.c_uint64 if is_64bit else ctypes.c_uint32
+            prototype = ctypes.WINFUNCTYPE(argtype, argtype, argtype, argtype, argtype)
+            GetWindowLongPtr = (
+                ctypes.windll.user32.GetWindowLongPtrW if is_64bit else ctypes.windll.user32.GetWindowLongW
+            )
+            SetWindowLongPtr = (
+                ctypes.windll.user32.SetWindowLongPtrW if is_64bit else ctypes.windll.user32.SetWindowLongW
+            )
+            GWL_WNDPROC = -4
+
+            def win_drop_proc(h, msg, wp, lp):
+                if msg == WM_DROPFILES:
+                    hdrop = argtype(wp)
+                    count = ctypes.windll.shell32.DragQueryFileW(hdrop, -1, None, 0)
+                    if count > 0:
+                        buf = ctypes.create_unicode_buffer(512)
+                        ctypes.windll.shell32.DragQueryFileW(hdrop, 0, buf, ctypes.sizeof(buf))
+                        dropped = buf.value
+                        self.root.after(0, lambda: self._handle_dropped_path(dropped))
+                    ctypes.windll.shell32.DragFinish(hdrop)
+                return ctypes.windll.user32.CallWindowProcW(self._old_wndproc, h, msg, wp, lp)
+
+            self._drop_cb = prototype(win_drop_proc)
+            self._old_wndproc = GetWindowLongPtr(target_hwnd, GWL_WNDPROC)
+            SetWindowLongPtr(target_hwnd, GWL_WNDPROC, self._drop_cb)
+
+            self._log("드래그 앤 드롭 활성화 완료 (Win32 OLE 대체 엔진)")
+        except Exception as e:
+            self._log(f"Win32 OLE 드래그 앤 드롭 등록 실패: {e}")
+
+    def _handle_dropped_path(self, path_str: str) -> None:
+        """드롭된 경로를 분석하여 대상 폴더 설정."""
+        p = Path(path_str).resolve()
+        if p.is_file():
+            # 파일을 끌어다 놓은 경우 그 파일이 있는 폴더로 자동 지정
+            self._set_target(p.parent)
+        elif p.is_dir():
+            self._set_target(p)
+        else:
+            self._log(f"유효하지 않은 경로입니다: {path_str}")
+
+    # ────────────────────────── 이벤트 핸들러 ──────────────────────────
 
     def _browse_folder(self) -> None:
         """폴더 선택 다이얼로그."""
@@ -322,9 +463,14 @@ class FlattenApp:
 
     def _set_target(self, path: Path) -> None:
         self.target_dir = path.resolve()
-        self.path_var.set(f"선택된 폴더: {self.target_dir}")
-        self.drop_label.config(text=f"📂  {self.target_dir.name}\n(다른 폴더를 드래그하여 변경)")
-        self._log(f"대상 폴더 설정: {self.target_dir}")
+        self.path_var.set(str(self.target_dir))
+        self.drop_icon.config(text="✅", fg=self.SUCCESS)
+        self.drop_label.config(
+            text=f"선택된 폴더: {self.target_dir.name}\n(다른 폴더를 드래그하여 언제든 변경 가능)",
+            fg=self.SUCCESS,
+        )
+        self.status_var.set(f"폴더가 선택되었습니다: {self.target_dir.name}  →  [🚀 작업 시작] 버튼을 누르세요.")
+        self._log(f"대상 폴더 지정: {self.target_dir}")
 
     def _log(self, msg: str) -> None:
         self.log_text.config(state=tk.NORMAL)
@@ -342,17 +488,20 @@ class FlattenApp:
 
     def _start(self) -> None:
         if self.target_dir is None:
-            messagebox.showwarning("경고", "먼저 폴더를 선택하거나 드래그하세요.")
+            messagebox.showwarning("폴더 미선택", "먼저 평탄화할 대상 폴더를 드래그하거나 선택해주세요.")
             return
         if not self.target_dir.exists():
-            messagebox.showerror("오류", f"폴더가 존재하지 않습니다:\n{self.target_dir}")
+            messagebox.showerror("오류", f"해당 폴더가 존재하지 않습니다:\n{self.target_dir}")
             return
 
         ok = messagebox.askyesno(
-            "확인",
-            f"다음 폴더를 평탄화합니다:\n\n{self.target_dir}\n\n"
-            "모든 하위 파일이 'all_files' 폴더로 이동되고,\n"
-            "빈 폴더가 삭제됩니다.\n\n계속하시겠습니까?",
+            "작업 확인",
+            f"다음 폴더를 평탄화(Flatten)하시겠습니까?\n\n"
+            f"경로: {self.target_dir}\n\n"
+            "• 하위 모든 파일이 'all_files' 폴더로 모입니다.\n"
+            "• 비어있는 하위 폴더는 모두 삭제됩니다.\n"
+            "• 작업 내역은 CSV 로그에 기록됩니다.\n\n"
+            "정말 진행하시겠습니까?",
         )
         if not ok:
             return
@@ -368,7 +517,7 @@ class FlattenApp:
     def _cancel(self) -> None:
         if self.is_running:
             self.cancel_event.set()
-            self._log("⚠️  취소 요청됨 — 현재 파일 처리 완료 후 중단합니다...")
+            self._log("⚠️ 작업 취소 요청됨 — 현재 파일 이동 완료 후 중단합니다...")
             self.cancel_btn.config(state=tk.DISABLED)
 
     def _finish(self) -> None:
@@ -384,62 +533,61 @@ class FlattenApp:
             self._do_flatten()
         except Exception as exc:
             self.root.after(0, lambda: self._log(f"❌ 예상치 못한 오류: {exc}"))
-            self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
+            self.root.after(0, lambda: messagebox.showerror("오류 발생", str(exc)))
         finally:
             self.root.after(0, self._finish)
 
-    def _do_flatten(self) -> None:  # noqa: C901 — 의도적으로 단일 흐름 유지
+    def _do_flatten(self) -> None:
         target_dir = self.target_dir
         all_files_dir = target_dir / "all_files"
 
         def ui(fn):
-            """메인 스레드에서 UI 업데이트."""
             self.root.after(0, fn)
 
         # ── 1. 스캔 ──
         ui(lambda: self._update_progress(0, "파일 스캔 중..."))
-        ui(lambda: self._log("▶ 1단계: 파일 스캔 중..."))
+        ui(lambda: self._log("▶ 1단계: 하위 파일 전체 스캔 시작..."))
 
         files = scan_files(target_dir, all_files_dir)
         total = len(files)
 
         if total == 0:
-            ui(lambda: self._log("이동할 하위 파일이 없습니다."))
+            ui(lambda: self._log("이동할 하위 파일이 없습니다 (이미 평탄화되어 있거나 비어있음)."))
             ui(lambda: self._update_progress(100, "완료 — 이동할 파일 없음"))
             ui(lambda: messagebox.showinfo("완료", "이동할 하위 파일이 없습니다."))
             return
 
-        ui(lambda: self._log(f"  → 발견된 파일: {total}개"))
+        ui(lambda: self._log(f"  → 발견된 총 파일: {total}개"))
 
         if self.cancel_event.is_set():
-            ui(lambda: self._log("❌ 사용자에 의해 취소됨"))
+            ui(lambda: self._log("❌ 사용자에 의해 작업이 취소되었습니다."))
             return
 
         # ── 2. all_files 생성 + 리네임 계획 ──
         all_files_dir.mkdir(exist_ok=True)
-        ui(lambda: self._update_progress(5, "충돌 검사 중..."))
-        ui(lambda: self._log("▶ 2단계: 충돌 검사 및 리네임 계획..."))
+        ui(lambda: self._update_progress(5, "충돌 검사 및 리네임 계획 수립 중..."))
+        ui(lambda: self._log("▶ 2단계: 파일명 충돌 검사 및 리네임 계획..."))
 
         plan = plan_renames(files, target_dir, all_files_dir)
         renamed_count = sum(1 for _, _, r in plan if r == "Y")
-        ui(lambda: self._log(f"  → 리네임 필요: {renamed_count}개"))
+        ui(lambda: self._log(f"  → 파일명 중복 충돌로 리네임되는 파일: {renamed_count}개"))
 
         if self.cancel_event.is_set():
-            ui(lambda: self._log("❌ 사용자에 의해 취소됨"))
+            ui(lambda: self._log("❌ 사용자에 의해 작업이 취소되었습니다."))
             return
 
         # ── 3. 파일 이동 ──
         ui(lambda: self._update_progress(10, "파일 이동 중..."))
-        ui(lambda: self._log("▶ 3단계: 파일 이동 중..."))
+        ui(lambda: self._log("▶ 3단계: all_files 폴더로 파일 이동 시작..."))
 
         results: list[dict] = []
         success_count = 0
         fail_count = 0
-        log_interval = max(1, total // 100)  # ~100회 UI 업데이트
+        log_interval = max(1, total // 80)
 
         for idx, (src, dest, renamed) in enumerate(plan, 1):
             if self.cancel_event.is_set():
-                ui(lambda i=idx: self._log(f"❌ 취소됨 ({i - 1}/{total} 처리 완료)"))
+                ui(lambda i=idx: self._log(f"❌ 취소됨 ({i - 1}/{total}개 처리 완료 후 중단)"))
                 break
 
             try:
@@ -463,16 +611,16 @@ class FlattenApp:
                 pct = 10 + (idx / total) * 70
                 ui(
                     lambda p=pct, i=idx, s=success_count, f=fail_count: self._update_progress(
-                        p, f"이동 중... {i}/{total}  성공={s} 실패={f}"
+                        p, f"이동 중... {i}/{total}건 (성공: {s}, 실패: {f})"
                     )
                 )
 
-        ui(lambda: self._log(f"  → 이동 완료: 성공={success_count}, 실패={fail_count}"))
+        ui(lambda: self._log(f"  → 이동 결과: 성공 {success_count}건, 실패 {fail_count}건"))
 
         # ── 4. 빈 폴더 삭제 ──
         if not self.cancel_event.is_set():
-            ui(lambda: self._update_progress(85, "빈 폴더 삭제 중..."))
-            ui(lambda: self._log("▶ 4단계: 빈 폴더 삭제 중..."))
+            ui(lambda: self._update_progress(85, "빈 폴더 정리(삭제) 중..."))
+            ui(lambda: self._log("▶ 4단계: 비어있는 하위 폴더 삭제..."))
 
             removed = 0
             all_files_resolved = all_files_dir.resolve()
@@ -490,11 +638,11 @@ class FlattenApp:
                 except Exception as exc:
                     ui(lambda d=dirpath, e=exc: self._log(f"  ⚠️ 폴더 삭제 실패: {d} ({e})"))
 
-            ui(lambda: self._log(f"  → 삭제된 폴더: {removed}개"))
+            ui(lambda: self._log(f"  → 삭제 완료된 빈 폴더: {removed}개"))
 
         # ── 5. 로그 기록 ──
-        ui(lambda: self._update_progress(92, "로그 기록 중..."))
-        ui(lambda: self._log("▶ 5단계: 로그 기록 중..."))
+        ui(lambda: self._update_progress(92, "CSV 결과 로그 저장 중..."))
+        ui(lambda: self._log("▶ 5단계: CSV 결과 로그 저장..."))
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_path = target_dir / f"flatten_log_{ts}.csv"
@@ -504,62 +652,63 @@ class FlattenApp:
                 writer = csv.DictWriter(f, fieldnames=["원본경로", "최종파일명", "상태", "리네임"])
                 writer.writeheader()
                 writer.writerows(results)
-            ui(lambda: self._log(f"  → 로그 파일: {log_path}"))
+            ui(lambda: self._log(f"  → 로그 파일 생성: {log_path}"))
         except Exception as exc:
             ui(lambda: self._log(f"  ⚠️ 로그 기록 실패: {exc}"))
 
         # ── 6. 무손실 검증 ──
-        ui(lambda: self._update_progress(96, "검증 중..."))
-        ui(lambda: self._log("▶ 6단계: 무손실 검증..."))
+        ui(lambda: self._update_progress(96, "무손실 검증 중..."))
+        ui(lambda: self._log("▶ 6단계: 무손실 검증 수행..."))
 
         actual_count = sum(1 for f in all_files_dir.iterdir() if f.is_file())
         match = (actual_count + fail_count) == total
 
         ui(
             lambda: self._log(
-                f"  스캔={total}, all_files={actual_count}, 실패={fail_count}, "
-                f"합계={actual_count + fail_count} → {'✅ 일치' if match else '⚠️ 불일치!'}"
+                f"  검증 수치: 스캔 {total}개 = (all_files {actual_count}개 + 실패 {fail_count}건) "
+                f"→ {'✅ 일치 (손실 없음)' if match else '⚠️ 불일치!'}"
             )
         )
 
-        # ── 완료 메시지 ──
+        # ── 완료 알림 ──
         if self.cancel_event.is_set():
-            ui(lambda: self._update_progress(100, "취소됨 (일부 처리 완료)"))
+            ui(lambda: self._update_progress(100, "작업 취소됨 (부분 완료)"))
             ui(
                 lambda: messagebox.showwarning(
-                    "취소됨",
-                    f"작업이 취소되었습니다.\n"
-                    f"처리: {success_count}/{total}\n"
-                    f"로그: {log_path}",
+                    "작업 취소",
+                    f"사용자에 의해 작업이 취소되었습니다.\n\n"
+                    f"처리 완료: {success_count}/{total}개\n"
+                    f"로그 파일: {log_path}",
                 )
             )
         elif match:
-            ui(lambda: self._update_progress(100, f"✅ 완료! {success_count}개 파일 이동"))
-            ui(lambda: self._log("✅ 평탄화 작업이 성공적으로 완료되었습니다!"))
+            ui(lambda: self._update_progress(100, f"✅ 완료! {success_count}개 파일 이동 성공"))
+            ui(lambda: self._log("🎉 모든 평탄화 작업이 성공적으로 완료되었습니다!"))
             ui(
                 lambda: messagebox.showinfo(
-                    "완료",
-                    f"평탄화 완료!\n\n"
-                    f"이동된 파일: {success_count}개\n"
-                    f"로그: {log_path}",
+                    "작업 완료",
+                    f"폴더 평탄화가 성공적으로 완료되었습니다!\n\n"
+                    f"• 이동된 파일: {success_count}개\n"
+                    f"• 리네임된 파일: {renamed_count}개\n"
+                    f"• 로그 파일: {log_path}",
                 )
             )
         else:
-            ui(lambda: self._update_progress(100, "⚠️ 완료 (검증 불일치)"))
+            ui(lambda: self._update_progress(100, "⚠️ 완료되었으나 수치 불일치"))
             ui(
                 lambda: messagebox.showwarning(
-                    "경고",
-                    f"파일 수 불일치!\n\n"
-                    f"예상: {total}\n"
-                    f"실제: {actual_count} + 실패 {fail_count}\n\n"
-                    f"로그 확인: {log_path}",
+                    "확인 필요",
+                    f"작업이 완료되었으나 수치에 차이가 있습니다.\n\n"
+                    f"예상 파일 수: {total}\n"
+                    f"실제 이동된 수: {actual_count}\n"
+                    f"실패 건수: {fail_count}\n\n"
+                    f"로그 파일을 확인해주세요:\n{log_path}",
                 )
             )
 
     # ────────────────────────── 실행 ──────────────────────────
 
     def run(self) -> None:
-        # 화면 중앙 배치
         self.root.update_idletasks()
         w = self.root.winfo_width()
         h = self.root.winfo_height()
@@ -571,7 +720,6 @@ class FlattenApp:
 
 # ═══════════════════════════════ 엔트리포인트 ═══════════════════════════════
 
-
 def main() -> None:
     app = FlattenApp()
     app.run()
@@ -581,7 +729,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        # --windowed 모드에서도 오류 확인 가능하도록
         try:
             messagebox.showerror("치명적 오류", str(e))
         except Exception:
