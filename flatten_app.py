@@ -45,7 +45,12 @@ def long_path(p: str) -> str:
 # ═══════════════════════════════ 핵심 로직 ═══════════════════════════════
 
 def scan_files(target_dir: Path, all_files_dir: Path) -> List[Path]:
-    """target_dir 하위를 재귀 스캔하여 이동 대상 파일 목록을 반환."""
+    """
+    target_dir 하위를 재귀 스캔하여 이동 대상 파일 목록을 반환.
+    - 최상위 폴더에 있는 파일도 모두 all_files 이동 대상에 포함
+    - all_files 폴더 내부는 스캔에서 제외
+    - 실행 파일(exe/py) 자체는 보호
+    """
     collected: List[Path] = []
     all_files_resolved = all_files_dir.resolve()
 
@@ -61,15 +66,14 @@ def scan_files(target_dir: Path, all_files_dir: Path) -> List[Path]:
             dirnames.remove(af_name)
 
         for fname in filenames:
-            # flatten_log 및 실행 파일 제외
-            if fname.startswith("flatten_log_") and fname.endswith(".csv"):
-                continue
+            # 실행 파일 및 스크립트 자신 제외
             if getattr(sys, "frozen", False) and fname == Path(sys.executable).name:
                 continue
-            full_path = real_dirpath / fname
-            # 이미 루트에 있는 파일은 이동 불필요
-            if full_path.parent.resolve() == target_dir.resolve():
+            if not getattr(sys, "frozen", False) and fname == Path(__file__).name:
                 continue
+
+            full_path = real_dirpath / fname
+            # 최상위 및 모든 하위 파일 수집
             collected.append(full_path)
 
     return collected
@@ -80,7 +84,7 @@ def plan_renames(
     target_dir: Path,
     all_files_dir: Path,
 ) -> List[Tuple[Path, Path, str]]:
-    """충돌 없는 이동 계획을 수립."""
+    """충돌 없는 이동 계획을 수립 (최상위 파일 및 하위 파일 모두 처리)."""
     plan: List[Tuple[Path, Path, str]] = []
     used_names: set[str] = set()
 
@@ -98,7 +102,10 @@ def plan_renames(
         if candidate.lower() in used_names:
             rel = src.relative_to(target_dir)
             parent_tag = "__".join(rel.parent.parts)
-            candidate = f"{stem}__{parent_tag}{suffix}"
+            if parent_tag:
+                candidate = f"{stem}__{parent_tag}{suffix}"
+            else:
+                candidate = f"{stem}{suffix}"
             renamed = "Y"
 
             counter = 2
@@ -630,46 +637,30 @@ class FlattenApp:
 
             ui(lambda: self._log(f"  → 삭제 완료된 빈 폴더: {removed}개"))
 
-        # ── 5. 로그 기록 ──
-        ui(lambda: self._update_progress(92, "CSV 결과 로그 저장 중..."))
-        ui(lambda: self._log("▶ 5단계: CSV 결과 로그 저장..."))
-
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = target_dir / f"flatten_log_{ts}.csv"
-
-        try:
-            with open(long_path(str(log_path)), "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.DictWriter(f, fieldnames=["원본경로", "최종파일명", "상태", "리네임"])
-                writer.writeheader()
-                writer.writerows(results)
-            ui(lambda: self._log(f"  → 로그 파일 생성: {log_path}"))
-        except Exception as exc:
-            ui(lambda: self._log(f"  ⚠️ 로그 기록 실패: {exc}"))
-
-        # ── 6. 무손실 검증 ──
-        ui(lambda: self._update_progress(96, "무손실 검증 중..."))
-        ui(lambda: self._log("▶ 6단계: 무손실 검증 수행..."))
+        # ── 5. 무손실 검증 ──
+        ui(lambda: self._update_progress(95, "무손실 검증 중..."))
+        ui(lambda: self._log("▶ 5단계: 무손실 검증 수행..."))
 
         actual_count = sum(1 for f in all_files_dir.iterdir() if f.is_file())
         match = (actual_count + fail_count) == total
 
         ui(
             lambda: self._log(
-                f"  검증 수치: 스캔 {total}개 = (all_files {actual_count}개 + 실패 {fail_count}건) "
-                f"→ {'✅ 일치 (손실 없음)' if match else '⚠️ 불일치!'}"
+                f"  검증 수치: 대상 {total}개 = (all_files {actual_count}개 + 실패 {fail_count}건) "
+                f"→ {'✅ 일치 (모든 파일 보존)' if match else '⚠️ 불일치!'}"
             )
         )
 
-        # ── 완료 처리 (별도 팝업 없이 UI 내 직접 반영) ──
+        # ── 완료 처리 (별도 팝업 및 CSV 파일 생성 없이 UI 내 직접 반영) ──
         if self.cancel_event.is_set():
             ui(lambda: self._update_progress(100, "⚠️ 작업 취소됨 (부분 완료)"))
-            ui(lambda: self._log(f"⚠️ 작업이 취소되었습니다. (처리: {success_count}/{total}개, 로그: {log_path})"))
+            ui(lambda: self._log(f"⚠️ 작업이 취소되었습니다. (이동 완료: {success_count}/{total}개)"))
         elif match:
-            ui(lambda: self._update_progress(100, f"✅ 평탄화 완료! ({success_count}개 파일 이동)"))
-            ui(lambda: self._log(f"🎉 모든 평탄화 작업이 완료되었습니다! (이동: {success_count}개, 리네임: {renamed_count}개, 로그: {log_path})"))
+            ui(lambda: self._update_progress(100, f"✅ 평탄화 완료! ({success_count}개 파일 모두 이동)"))
+            ui(lambda: self._log(f"🎉 모든 평탄화 작업이 완료되었습니다! (총 이동: {success_count}개, 리네임: {renamed_count}개)"))
         else:
             ui(lambda: self._update_progress(100, "⚠️ 완료되었으나 수치 불일치"))
-            ui(lambda: self._log(f"⚠️ 파일 수 불일치! 예상: {total}, 실제: {actual_count}, 실패: {fail_count} → 로그 확인: {log_path}"))
+            ui(lambda: self._log(f"⚠️ 파일 수 불일치! 대상: {total}, 이동됨: {actual_count}, 실패: {fail_count}"))
 
     # ────────────────────────── 실행 ──────────────────────────
 
