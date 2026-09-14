@@ -573,9 +573,9 @@ class FlattenApp:
             ui(lambda: self._log("❌ 사용자에 의해 작업이 취소되었습니다."))
             return
 
-        # ── 3. 파일 이동 ──
-        ui(lambda: self._update_progress(10, "파일 이동 중..."))
-        ui(lambda: self._log("▶ 3단계: all_files 폴더로 파일 이동 시작..."))
+        # ── 3. 파일 복사 ──
+        ui(lambda: self._update_progress(10, "파일 복사 중..."))
+        ui(lambda: self._log("▶ 3단계: all_files 폴더로 파일 복사 시작... (원본은 그대로 유지)"))
 
         results: list[dict] = []
         success_count = 0
@@ -588,7 +588,7 @@ class FlattenApp:
                 break
 
             try:
-                shutil.move(long_path(str(src)), long_path(str(dest)))
+                shutil.copy2(long_path(str(src)), long_path(str(dest)))
                 status = "성공"
                 success_count += 1
             except Exception as exc:
@@ -605,41 +605,18 @@ class FlattenApp:
             )
 
             if idx % log_interval == 0 or idx == total:
-                pct = 10 + (idx / total) * 70
+                pct = 10 + (idx / total) * 80
                 ui(
                     lambda p=pct, i=idx, s=success_count, f=fail_count: self._update_progress(
-                        p, f"이동 중... {i}/{total}건 (성공: {s}, 실패: {f})"
+                        p, f"복사 중... {i}/{total}건 (성공: {s}, 실패: {f})"
                     )
                 )
 
-        ui(lambda: self._log(f"  → 이동 결과: 성공 {success_count}건, 실패 {fail_count}건"))
+        ui(lambda: self._log(f"  → 복사 결과: 성공 {success_count}건, 실패 {fail_count}건"))
 
-        # ── 4. 빈 폴더 삭제 ──
-        if not self.cancel_event.is_set():
-            ui(lambda: self._update_progress(85, "빈 폴더 정리(삭제) 중..."))
-            ui(lambda: self._log("▶ 4단계: 비어있는 하위 폴더 삭제..."))
-
-            removed = 0
-            all_files_resolved = all_files_dir.resolve()
-
-            for dirpath, _dirnames, _filenames in os.walk(str(target_dir), topdown=False):
-                dp = Path(dirpath).resolve()
-                if dp == target_dir.resolve():
-                    continue
-                if dp == all_files_resolved or str(dp).startswith(str(all_files_resolved)):
-                    continue
-                try:
-                    if not list(Path(dirpath).iterdir()):
-                        os.rmdir(long_path(str(dirpath)))
-                        removed += 1
-                except Exception as exc:
-                    ui(lambda d=dirpath, e=exc: self._log(f"  ⚠️ 폴더 삭제 실패: {d} ({e})"))
-
-            ui(lambda: self._log(f"  → 삭제 완료된 빈 폴더: {removed}개"))
-
-        # ── 5. 무손실 검증 ──
+        # ── 4. 무손실 검증 ──
         ui(lambda: self._update_progress(95, "무손실 검증 중..."))
-        ui(lambda: self._log("▶ 5단계: 무손실 검증 수행..."))
+        ui(lambda: self._log("▶ 4단계: 무손실 검증 수행..."))
 
         actual_count = sum(1 for f in all_files_dir.iterdir() if f.is_file())
         match = (actual_count + fail_count) == total
@@ -651,16 +628,16 @@ class FlattenApp:
             )
         )
 
-        # ── 완료 처리 (별도 팝업 및 CSV 파일 생성 없이 UI 내 직접 반영) ──
+        # ── 완료 처리 ──
         if self.cancel_event.is_set():
             ui(lambda: self._update_progress(100, "⚠️ 작업 취소됨 (부분 완료)"))
-            ui(lambda: self._log(f"⚠️ 작업이 취소되었습니다. (이동 완료: {success_count}/{total}개)"))
+            ui(lambda: self._log(f"⚠️ 작업이 취소되었습니다. (복사 완료: {success_count}/{total}개)"))
         elif match:
-            ui(lambda: self._update_progress(100, f"✅ 평탄화 완료! ({success_count}개 파일 모두 이동)"))
-            ui(lambda: self._log(f"🎉 모든 평탄화 작업이 완료되었습니다! (총 이동: {success_count}개, 리네임: {renamed_count}개)"))
+            ui(lambda: self._update_progress(100, f"✅ 완료! ({success_count}개 파일 복사)"))
+            ui(lambda: self._log(f"🎉 모든 파일이 all_files 폴더에 복사 완료! (총: {success_count}개, 리네임: {renamed_count}개, 원본 유지)"))
         else:
             ui(lambda: self._update_progress(100, "⚠️ 완료되었으나 수치 불일치"))
-            ui(lambda: self._log(f"⚠️ 파일 수 불일치! 대상: {total}, 이동됨: {actual_count}, 실패: {fail_count}"))
+            ui(lambda: self._log(f"⚠️ 파일 수 불일치! 대상: {total}, 복사됨: {actual_count}, 실패: {fail_count}"))
 
     # ────────────────────────── 실행 ──────────────────────────
 
